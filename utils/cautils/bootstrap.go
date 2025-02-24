@@ -11,15 +11,17 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
+	"github.com/urfave/cli"
+
 	"github.com/smallstep/certificates/ca"
 	"github.com/smallstep/certificates/pki"
-	"github.com/smallstep/cli/utils"
+	"github.com/smallstep/cli-utils/errs"
+	"github.com/smallstep/cli-utils/step"
+	"github.com/smallstep/cli-utils/ui"
 	"github.com/smallstep/truststore"
-	"github.com/urfave/cli"
-	"go.step.sm/cli-utils/errs"
-	"go.step.sm/cli-utils/step"
-	"go.step.sm/cli-utils/ui"
 	"go.step.sm/crypto/pemutil"
+
+	"github.com/smallstep/cli/utils"
 )
 
 type bootstrapAPIResponse struct {
@@ -217,6 +219,15 @@ func BootstrapTeamAuthority(ctx *cli.Context, team, teamAuthority string) error 
 		apiEndpoint = u.String()
 	}
 
+	// Get the --redirect-url flag, If passed, we will use this one even if the
+	// API provides one.
+	redirectURL := ctx.String("redirect-url")
+	if redirectURL != "" {
+		if _, err := url.Parse(redirectURL); err != nil {
+			return err
+		}
+	}
+
 	// Using public PKI
 	//nolint:gosec // Variadic URL is considered safe here for the following reasons:
 	//  1) The input is from the command line, rather than a web form or publicly available API.
@@ -237,8 +248,9 @@ func BootstrapTeamAuthority(ctx *cli.Context, team, teamAuthority string) error 
 	if err := readJSON(resp.Body, &r); err != nil {
 		return errors.Wrap(err, "error getting authority data")
 	}
-
-	if r.RedirectURL == "" {
+	if redirectURL != "" {
+		r.RedirectURL = redirectURL
+	} else if r.RedirectURL == "" {
 		r.RedirectURL = "https://smallstep.com/app/teams/sso/success"
 	}
 
@@ -255,8 +267,19 @@ func BootstrapAuthority(ctx *cli.Context, caURL, fingerprint string) (err error)
 			return err
 		}
 	}
-	return bootstrap(ctx, caURL, fingerprint,
-		withDefaultContextValues(caHostname))
+
+	var opts = []bootstrapOption{
+		withDefaultContextValues(caHostname),
+	}
+
+	if redirectURL := ctx.String("redirect-url"); redirectURL != "" {
+		if _, err := url.Parse(redirectURL); err != nil {
+			return err
+		}
+		opts = append(opts, withRedirectURL(redirectURL))
+	}
+
+	return bootstrap(ctx, caURL, fingerprint, opts...)
 }
 
 func getHost(caURL string) (string, error) {
