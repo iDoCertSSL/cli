@@ -1,7 +1,6 @@
 package oauth
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"crypto/x509"
@@ -21,14 +20,16 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/urfave/cli"
+
+	"github.com/smallstep/cli-utils/command"
+	"github.com/smallstep/cli-utils/errs"
+	"go.step.sm/crypto/jose"
+	"go.step.sm/crypto/randutil"
+
 	"github.com/smallstep/cli/exec"
 	"github.com/smallstep/cli/flags"
 	"github.com/smallstep/cli/utils"
-	"github.com/urfave/cli"
-	"go.step.sm/cli-utils/command"
-	"go.step.sm/cli-utils/errs"
-	"go.step.sm/crypto/jose"
-	"go.step.sm/crypto/randutil"
 )
 
 // These are the OAuth2.0 client IDs from the Step CLI. This application is
@@ -44,10 +45,12 @@ import (
 // Google is also distributing the client ID and secret on the cloud SDK
 // available here https://cloud.google.com/sdk/docs/quickstarts
 const (
+	//nolint:gosec // This is a client meant for open source testing. The client has no security access or roles.
 	defaultClientID = "1087160488420-8qt7bavg3qesdhs6it824mhnfgcfe8il.apps.googleusercontent.com"
 	//nolint:gosec // This is a client meant for open source testing. The client has no security access or roles.
 	defaultClientNotSoSecret = "udTrOT3gzrO7W9fDPgZQLfYJ"
 
+	//nolint:gosec // This is a client meant for open source testing. The client has no security access or roles.
 	defaultDeviceAuthzClientID = "1087160488420-1u0jqoulmv3mfomfh6fhkfs4vk4bdjih.apps.googleusercontent.com"
 	//nolint:gosec // This is a client meant for open source testing. The client has no security access or roles.
 	defaultDeviceAuthzClientNotSoSecret = "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"
@@ -289,17 +292,13 @@ OpenID standard defines the following values, but your provider may support some
 				Usage:  "Uses the implicit flow to authenticate the user. Requires **--insecure** and **--client-id** flags.",
 				Hidden: true,
 			},
-			cli.BoolFlag{
-				Name:   "insecure",
-				Usage:  "Allows the use of insecure flows.",
-				Hidden: true,
-			},
 			cli.StringFlag{
 				Name:   "browser",
 				Usage:  "Path to browser for OAuth flow (macOS only).",
 				Hidden: true,
 			},
 			flags.RedirectURL,
+			flags.InsecureHidden,
 		},
 		Action: oauthCmd,
 	}
@@ -785,18 +784,22 @@ func (o *oauth) DoLoopbackAuthorization() (*token, error) {
 		return nil, err
 	}
 
-	if err := exec.OpenInBrowser(authURL, o.browser); err != nil {
-		fmt.Fprintln(os.Stderr, "Cannot open a web browser on your platform.")
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "Open a local web browser and visit:")
-		fmt.Fprintln(os.Stderr)
+	if skipBrowser := os.Getenv("STEP_OPEN_BROWSER") == "0"; skipBrowser {
 		fmt.Fprintln(os.Stderr, authURL)
-		fmt.Fprintln(os.Stderr)
 	} else {
-		fmt.Fprintln(os.Stderr, "Your default web browser has been opened to visit:")
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, authURL)
-		fmt.Fprintln(os.Stderr)
+		if err := exec.OpenInBrowser(authURL, o.browser); err != nil {
+			fmt.Fprintln(os.Stderr, "Cannot open a web browser on your platform.")
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, "Open a local web browser and visit:")
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, authURL)
+			fmt.Fprintln(os.Stderr)
+		} else {
+			fmt.Fprintln(os.Stderr, "Your default web browser has been opened to visit:")
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, authURL)
+			fmt.Fprintln(os.Stderr)
+		}
 	}
 
 	// Wait for response and return the token
@@ -903,10 +906,8 @@ func (o *oauth) DoDeviceAuthorization() (*token, error) {
 		idr.Interval = defaultDeviceAuthzInterval
 	}
 
-	fmt.Fprintf(os.Stderr, "Visit %s and enter the code: (press 'ENTER' to open default browser)\n", idr.VerificationURI)
+	fmt.Fprintf(os.Stderr, "Visit %s and enter the code:\n", idr.VerificationURI)
 	fmt.Fprintln(os.Stderr, idr.UserCode)
-
-	go openBrowserIfAsked(o, idr.VerificationURI)
 
 	// Poll the Token endpoint until the user completes the flow.
 	data = url.Values{}
@@ -939,13 +940,6 @@ func (o *oauth) DoDeviceAuthorization() (*token, error) {
 			return nil, errors.New("device authorization grant expired")
 		}
 	}
-}
-
-func openBrowserIfAsked(o *oauth, u string) {
-	reader := bufio.NewReader(os.Stdin)
-	reader.ReadString('\n')
-
-	exec.OpenInBrowser(u, o.browser)
 }
 
 var errHTTPToken = errors.New("bad request; token not returned")
@@ -1089,6 +1083,12 @@ func (o *oauth) DoJWTAuthorization(issuer, aud string) (*token, error) {
 func (o *oauth) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.URL.Path != o.CallbackPath {
 		http.NotFound(w, req)
+		return
+	}
+
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		w.Write(nil)
 		return
 	}
 

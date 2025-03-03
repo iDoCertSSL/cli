@@ -8,10 +8,12 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
-	"go.step.sm/cli-utils/errs"
 
 	"github.com/smallstep/certificates/ca"
+	"github.com/smallstep/cli-utils/errs"
+
 	"github.com/smallstep/cli/flags"
+	"github.com/smallstep/cli/internal/cast"
 	"github.com/smallstep/cli/utils/cautils"
 )
 
@@ -122,7 +124,7 @@ func listAction(ctx *cli.Context) (err error) {
 	startedPager := false
 
 	for {
-		options := []ca.AdminOption{ca.WithAdminCursor(cursor), ca.WithAdminLimit(int(limit))}
+		options := []ca.AdminOption{ca.WithAdminCursor(cursor), ca.WithAdminLimit(cast.Int(limit))}
 		eaksResponse, err := client.GetExternalAccountKeysPaginate(provisioner, reference, options...)
 		if err != nil {
 			return errors.Wrap(notImplemented(err), "error retrieving ACME EAB keys")

@@ -8,11 +8,14 @@ import (
 
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
-	"github.com/smallstep/cli/flags"
-	"github.com/smallstep/cli/utils"
 	"github.com/urfave/cli"
-	"go.step.sm/cli-utils/command"
-	"go.step.sm/cli-utils/errs"
+
+	"github.com/smallstep/cli-utils/command"
+	"github.com/smallstep/cli-utils/errs"
+
+	"github.com/smallstep/cli/flags"
+	"github.com/smallstep/cli/internal/cast"
+	"github.com/smallstep/cli/utils"
 )
 
 func generateCommand() cli.Command {
@@ -128,8 +131,8 @@ func generate(ctx *cli.Context) (*otp.Key, error) {
 	return totp.Generate(totp.GenerateOpts{
 		Issuer:      ctx.String("issuer"),
 		AccountName: ctx.String("account"),
-		Period:      uint(ctx.Int("period")),
-		SecretSize:  uint(ctx.Int("secret-size")),
+		Period:      cast.Uint(ctx.Int("period")),
+		SecretSize:  cast.Uint(ctx.Int("secret-size")),
 		Digits:      otp.Digits(ctx.Int("length")),
 		Algorithm:   alg,
 	})

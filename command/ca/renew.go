@@ -20,21 +20,24 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/urfave/cli"
+
 	"github.com/smallstep/certificates/api"
 	"github.com/smallstep/certificates/ca"
 	"github.com/smallstep/certificates/pki"
+	"github.com/smallstep/cli-utils/command"
+	"github.com/smallstep/cli-utils/errs"
+	"github.com/smallstep/cli-utils/ui"
+	"go.step.sm/crypto/jose"
+	"go.step.sm/crypto/pemutil"
+	"go.step.sm/crypto/x509util"
+
 	"github.com/smallstep/cli/flags"
+	"github.com/smallstep/cli/internal/cryptoutil"
 	"github.com/smallstep/cli/token"
 	"github.com/smallstep/cli/utils"
 	"github.com/smallstep/cli/utils/cautils"
 	"github.com/smallstep/cli/utils/sysutils"
-	"github.com/urfave/cli"
-	"go.step.sm/cli-utils/command"
-	"go.step.sm/cli-utils/errs"
-	"go.step.sm/cli-utils/ui"
-	"go.step.sm/crypto/jose"
-	"go.step.sm/crypto/pemutil"
-	"go.step.sm/crypto/x509util"
 )
 
 func renewCertificateCommand() cli.Command {
@@ -45,7 +48,7 @@ func renewCertificateCommand() cli.Command {
 		UsageText: `**step ca renew** <crt-file> <key-file>
 [**--mtls**] [**--password-file**=<file>] [**--out**=<file>] [**--expires-in**=<duration>]
 [**--force**] [**--pid**=<int>] [**--pid-file**=<file>] [**--signal**=<int>]
-[**--exec**=<string>] [**--daemon**] [**--renew-period**=<duration>]
+[**--exec**=<string>] [**--daemon**] [**--renew-period**=<duration>] [**--kms**=<uri>]
 [**--ca-url**=<uri>] [**--root**=<file>] [**--context**=<name>]`,
 		Description: `
 **step ca renew** command renews the given certificate (with a request to the
@@ -100,6 +103,13 @@ $ step ca renew --force internal.crt internal.key
 Renew a certificate using the token flow instead of mTLS:
 '''
 $ step ca renew --mtls=false --force internal.crt internal.key
+'''
+
+Renew a certificate which key is in a KMS:
+'''
+$ step ca renew \
+  --kms 'pkcs11:module-path=/usr/local/lib/softhsm/libsofthsm2.so;token=smallstep?pin-value=password' \
+  pkcs11.crt 'pkcs11:id=4001'
 '''
 
 Renew a certificate providing the <--ca-url> and <--root> flags:
@@ -157,6 +167,7 @@ authorization flow instead.`,
 			flags.Force,
 			flags.Offline,
 			flags.PasswordFile,
+			flags.KMSUri,
 			cli.StringFlag{
 				Name:  "out,output-file",
 				Usage: "The new certificate <file> path. Defaults to overwriting the <crt-file> positional argument",
@@ -226,6 +237,7 @@ func renewCertificateAction(ctx *cli.Context) error {
 	passFile := ctx.String("password-file")
 	isDaemon := ctx.Bool("daemon")
 	execCmd := ctx.String("exec")
+	kmsURI := ctx.String("kms")
 
 	outFile := ctx.String("out")
 	if outFile == "" {
@@ -243,12 +255,12 @@ func renewCertificateAction(ctx *cli.Context) error {
 	}
 
 	var expiresIn, renewPeriod time.Duration
-	if s := ctx.String("expires-in"); len(s) > 0 {
+	if s := ctx.String("expires-in"); s != "" {
 		if expiresIn, err = time.ParseDuration(s); err != nil {
 			return errs.InvalidFlagValue(ctx, "expires-in", s, "")
 		}
 	}
-	if s := ctx.String("renew-period"); len(s) > 0 {
+	if s := ctx.String("renew-period"); s != "" {
 		if renewPeriod, err = time.ParseDuration(s); err != nil {
 			return errs.InvalidFlagValue(ctx, "renew-period", s, "")
 		}
@@ -269,7 +281,7 @@ func renewCertificateAction(ctx *cli.Context) error {
 	}
 
 	pidFile := ctx.String("pid-file")
-	if len(pidFile) > 0 {
+	if pidFile != "" {
 		pidB, err := os.ReadFile(pidFile)
 		if err != nil {
 			return errs.FileError(err, pidFile)
@@ -288,7 +300,7 @@ func renewCertificateAction(ctx *cli.Context) error {
 		return errs.InvalidFlagValue(ctx, "signal", strconv.Itoa(signum), "")
 	}
 
-	cert, err := tlsLoadX509KeyPair(certFile, keyFile, passFile)
+	cert, err := tlsLoadX509KeyPair(kmsURI, certFile, keyFile, passFile)
 	if err != nil {
 		return err
 	}
@@ -472,7 +484,7 @@ func (r *renewer) Renew(outFile string) (resp *api.SignResponse, err error) {
 		return nil, errors.Wrap(err, "error renewing certificate")
 	}
 
-	if resp.CertChainPEM == nil || len(resp.CertChainPEM) == 0 {
+	if len(resp.CertChainPEM) == 0 {
 		resp.CertChainPEM = []api.Certificate{resp.ServerPEM, resp.CaPEM}
 	}
 	var data []byte
@@ -503,7 +515,7 @@ func (r *renewer) Rekey(priv interface{}, outCert, outKey string, writePrivateKe
 	if err != nil {
 		return nil, errors.Wrap(err, "error rekeying certificate")
 	}
-	if resp.CertChainPEM == nil || len(resp.CertChainPEM) == 0 {
+	if len(resp.CertChainPEM) == 0 {
 		resp.CertChainPEM = []api.Certificate{resp.ServerPEM, resp.CaPEM}
 	}
 	var data []byte
@@ -636,7 +648,7 @@ func (r *renewer) RenewWithToken(cert tls.Certificate) (*api.SignResponse, error
 	return r.client.RenewWithToken(tok)
 }
 
-func tlsLoadX509KeyPair(certFile, keyFile, passFile string) (tls.Certificate, error) {
+func tlsLoadX509KeyPair(kms, certFile, keyFile, passFile string) (tls.Certificate, error) {
 	x509Chain, err := pemutil.ReadCertificateBundle(certFile)
 	if err != nil {
 		return tls.Certificate{}, errs.Wrap(err, "error reading certificate chain")
@@ -650,14 +662,13 @@ func tlsLoadX509KeyPair(certFile, keyFile, passFile string) (tls.Certificate, er
 	if passFile != "" {
 		opts = append(opts, pemutil.WithPasswordFile(passFile))
 	}
-	pk, err := pemutil.Read(keyFile, opts...)
+	signer, err := cryptoutil.CreateSigner(kms, keyFile, opts...)
 	if err != nil {
-		return tls.Certificate{}, errs.Wrap(err, "error parsing private key")
+		return tls.Certificate{}, errs.Wrap(err, "error loading private key")
 	}
-
 	return tls.Certificate{
 		Certificate: x509ChainBytes,
-		PrivateKey:  pk,
+		PrivateKey:  signer,
 		Leaf:        x509Chain[0],
 	}, nil
 }
